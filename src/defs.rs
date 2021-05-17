@@ -12,7 +12,8 @@ pub struct Args<'a>{
     pub file_names: Arc<Mutex<Vec<String>>>, 
     pub se: Regex, 
     pub state: Arc<Mutex<States>>,
-    pub path: String
+    pub path: String,
+    pub name: String,
 }
 #[derive(Clone)]
 pub struct StateList<T> {

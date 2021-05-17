@@ -14,3 +14,4 @@ zip = "0.5.12"
 crossterm = { version = "0.19", features = ["event-stream"] }
 tui = { version = "0.15", default-features = false, features = ['crossterm'] }
 regex = "1.5.4"
+uuid = { version = "0.8.2", features = ["v4"]}

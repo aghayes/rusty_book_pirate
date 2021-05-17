@@ -14,13 +14,13 @@ use crate::defs::{States, Item, StateList, Args};
 mod dcc;
 use crate::dcc::{Dcc};
 
-async fn connect(server_pair: &str) -> Result<(irc::client::Client, irc::client::ClientStream, String, String), irc::error::Error>{
+async fn connect(server_pair: &str, name: String) -> Result<(irc::client::Client, irc::client::ClientStream, String, String), irc::error::Error>{
     let server_pair: Vec<&str> = server_pair.split(", ").collect();
     let server = Some(server_pair[0].to_string());
     let channel = server_pair[1].to_string();
     let channels = vec![channel.clone()];
     let config = Config {
-        nickname: Some(NAME.to_owned()),
+        nickname: Some(name.to_string()),
         server,
         port: Some(6667),
         use_tls: Some(false),
@@ -46,14 +46,13 @@ async fn connect(server_pair: &str) -> Result<(irc::client::Client, irc::client:
     }
     return Ok((client, stream, channel, server_pair[2].to_string()))
 }
-const NAME: &str = "RustyBookPirate";
 const CON_OPTIONS: [&str; 2] = [
     "irc.irchighway.net, #ebooks, @Search",
     "irc.irchighway.net, #ebooks, @Searchook",
 ];
 
 
-async fn irc_get(chan: Arc<String> ,cmd: &str, client: Arc<irc::client::Client>, stream: Arc<Mutex<mpsc::UnboundedReceiver<Result<irc::proto::Message, irc::error::Error>>>>, se: &Regex, timeout: u64) -> Result<String, irc::error::Error>{
+async fn irc_get(chan: Arc<String> ,cmd: &str, client: Arc<irc::client::Client>, stream: Arc<Mutex<mpsc::UnboundedReceiver<Result<irc::proto::Message, irc::error::Error>>>>, se: &Regex, timeout: u64, name: &str) -> Result<String, irc::error::Error>{
     let mut stream = stream.lock().await;
     client.send_privmsg(chan, cmd)?;
     let start = std::time::Instant::now();
@@ -66,7 +65,7 @@ async fn irc_get(chan: Arc<String> ,cmd: &str, client: Arc<irc::client::Client>,
             None => continue,
         };
         if let Command::PRIVMSG(nm, msg) = &m.command {
-            if nm == NAME && se.is_match(msg) {
+            if nm == name && se.is_match(msg) {
                 return Ok(String::from(msg))
             }
         }
@@ -89,7 +88,7 @@ fn parse_search(zip_file: std::io::Cursor<Vec<u8>>) -> Result<Vec<String>, io::E
 
 async fn get_book(args: Args<'_>){
     std::fs::create_dir_all(&args.path).unwrap();
-    let dcc = match Dcc::from_msg(match &irc_get(args.chan, &args.cmd, args.client, args.stream, &args.se, 60).await{
+    let dcc = match Dcc::from_msg(match &irc_get(args.chan, &args.cmd, args.client, args.stream, &args.se, 60, &args.name).await{
         Ok(m) => m, 
         Err(_) => {let mut state = args.state.lock().await; *state = States::Failed; return},
         }){
@@ -108,7 +107,7 @@ async fn get_book(args: Args<'_>){
     *state = States::Got;
 }
 async fn get_search(args: Args<'_>){
-    let dcc = Dcc::from_msg(match &irc_get(args.chan.clone() ,&args.cmd, args.client.clone(), args.stream.clone(), &args.se, 60).await{
+    let dcc = Dcc::from_msg(match &irc_get(args.chan.clone() ,&args.cmd, args.client.clone(), args.stream.clone(), &args.se, 60, &args.name).await{
         Ok(m) => m,
         Err(_) => {let mut state = args.state.lock().await; *state = States::SearchFailed; return}
     }).unwrap();
@@ -152,6 +151,7 @@ async fn pingpong(mut stream: irc::client::ClientStream,  new_stream: mpsc::Unbo
 }
 #[tokio::main]
 async fn main () {
+    let NAME = format!["RBP{}", uuid::Uuid::new_v4().as_fields().1];
     let re = Regex::new(r#"(?:(?i)SEND\s"*)((?i).*[a-z])(?:(:?(?i)"*)\s[0-9])"#).unwrap();
 
     let cons = CON_OPTIONS.iter().map(|c|{Item{item: ListItem::new((&c).to_string()), cmd: c.to_string()}}).collect();
@@ -234,7 +234,7 @@ async fn main () {
                                             .alignment(Alignment::Center);
                                         f.render_widget(prompt, chunks[0]);
                 }).unwrap();
-                let (c, s, chan, cmd) = connect(server).await.unwrap(); client = Some(c); stream = Some(s); channel = Some(chan); search_command = Some(cmd); *loop_state = States::Connected; break
+                let (c, s, chan, cmd) = connect(server, NAME.clone()).await.unwrap(); client = Some(c); stream = Some(s); channel = Some(chan); search_command = Some(cmd); *loop_state = States::Connected; break
             },
             _=>(),
         }
@@ -371,6 +371,7 @@ async fn main () {
                                                                 se: re.clone(), 
                                                                 state: state.clone(),
                                                                 path: String::new(),
+                                                                name: NAME.clone(),
                                                             }
                                                         ));
                                                         *loop_state = States::Search(search_term.clone()); 
@@ -492,7 +493,8 @@ async fn main () {
                                                                 file_names: file_names.clone(),
                                                                 se: re.clone(), 
                                                                 state: state.clone(),
-                                                                path:dir_path.clone()
+                                                                path:dir_path.clone(),
+                                                                name: NAME.clone(),
                                                             }
                                                         ));
                                                         *loop_state = States::Getting;
