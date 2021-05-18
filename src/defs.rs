@@ -4,9 +4,9 @@ use std::sync::Arc;
 use regex::Regex;
 
 pub struct Args<'a>{
-    pub chan: Arc<String>, 
+    pub chan: String, 
     pub cmd: String, 
-    pub client: Arc<irc::client::Client>, 
+    pub client: Arc<Mutex<Option<irc::client::Client>>>, 
     pub stream: Arc<Mutex<mpsc::UnboundedReceiver<Result<irc::proto::Message, irc::error::Error>>>>, 
     pub items: Arc<Mutex<StateList<Item<'a>>>>, 
     pub file_names: Arc<Mutex<Vec<String>>>, 

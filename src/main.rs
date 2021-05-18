@@ -14,7 +14,7 @@ use crate::defs::{States, Item, StateList, Args};
 mod dcc;
 use crate::dcc::{Dcc};
 
-async fn connect(server_pair: &str, name: String) -> Result<(irc::client::Client, irc::client::ClientStream, String, String), irc::error::Error>{
+async fn connect(server_pair: String, name: String) -> Result<(irc::client::Client, irc::client::ClientStream, String, String), irc::error::Error>{
     let server_pair: Vec<&str> = server_pair.split(", ").collect();
     let server = Some(server_pair[0].to_string());
     let channel = server_pair[1].to_string();
@@ -52,9 +52,11 @@ const CON_OPTIONS: [&str; 2] = [
 ];
 
 
-async fn irc_get(chan: Arc<String> ,cmd: &str, client: Arc<irc::client::Client>, stream: Arc<Mutex<mpsc::UnboundedReceiver<Result<irc::proto::Message, irc::error::Error>>>>, se: &Regex, timeout: u64, name: &str) -> Result<String, irc::error::Error>{
+async fn irc_get(chan: String ,cmd: &str, client: Arc<Mutex<Option<irc::client::Client>>>, stream: Arc<Mutex<mpsc::UnboundedReceiver<Result<irc::proto::Message, irc::error::Error>>>>, se: &Regex, timeout: u64, name: &str) -> Result<String, irc::error::Error>{
     let mut stream = stream.lock().await;
-    client.send_privmsg(chan, cmd)?;
+    let client = client.lock().await;
+    (*client).as_ref().unwrap().send_privmsg(chan, cmd)?;
+    drop(client);
     let start = std::time::Instant::now();
     loop{
         if timeout != 0 && start.elapsed().as_secs() == timeout{
@@ -116,8 +118,9 @@ async fn get_search(args: Args<'_>){
     let mut search_results = parse_search(file).unwrap();
 
     let mut sources: HashMap<String, bool> = HashMap::new();
-
-    if let Some(users) = args.client.list_users(&args.chan){
+    let client = args.client.lock().await;
+    if let Some(users) = (*client).as_ref().unwrap().list_users(&args.chan){
+        drop(client);
         for user in &users{
             sources.insert(user.get_nickname().to_string(), true);
         }
@@ -134,21 +137,40 @@ async fn get_search(args: Args<'_>){
     let raw_items = search_results.clone();
     let mut items = args.items.lock().await;
     *items = StateList::from(search_results.iter().map(|i| Item{item: ListItem::new(i.clone()), cmd: i.clone()}).collect());
+    drop(items);
     let mut file_names = args.file_names.lock().await;
     *file_names = raw_items;
+    drop(file_names);
     let mut state = args.state.lock().await;
     *state = States::Results;
 }
-async fn pingpong(mut stream: irc::client::ClientStream,  new_stream: mpsc::UnboundedSender<Result<irc::proto::Message, irc::error::Error>>, client: Arc<irc::client::Client>){
+async fn pingpong(stream: Arc<Mutex<Option<irc::client::ClientStream>>>,  new_stream: mpsc::UnboundedSender<Result<irc::proto::Message, irc::error::Error>>, client: Arc<Mutex<Option<irc::client::Client>>>){
+    let mut stream = stream.lock().await;
+    let stream = (*stream).as_mut().unwrap();
     while let Some(m) = stream.next().await{
         let m = m.unwrap();
         if let irc::proto::Command::PING(_,_) = m.command{
-            client.send_pong("pong").unwrap();
+            let client = client.lock().await;
+            (*client).as_ref().unwrap().send_pong("pong").unwrap();
+            drop(client);
         }else{
             new_stream.send(Ok(m)).unwrap();
         }
     }
 }
+async fn con_handle(client: Arc<Mutex<Option<irc::client::Client>>>, server: String, NAME: String, stream: Arc<Mutex<Option<irc::client::ClientStream>>>, channel: Arc<Mutex<Option<String>>>, search_command: Arc<Mutex<Option<String>>>, state: Arc<Mutex<States>>){
+    let (c, s, chan, cmd) = connect(server, NAME.clone()).await.unwrap(); 
+    let mut client = client.lock().await; 
+    *client = Some(c);
+    let mut stream = stream.lock().await;
+    *stream = Some(s); 
+    let mut channel = channel.lock().await;
+    *channel = Some(chan);
+    let mut search_command = search_command.lock().await;
+    *search_command = Some(cmd);
+    let mut state = state.lock().await;
+    *state = States::Connected; 
+    }
 #[tokio::main]
 async fn main () {
     let NAME = format!["RBP{}", uuid::Uuid::new_v4().as_fields().1];
@@ -166,10 +188,10 @@ async fn main () {
     let stdout = io::stdout();
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend).unwrap();
-    let client: Option<irc::client::Client>;
-    let stream: Option<irc::client::ClientStream>;
-    let channel: Option<String>;
-    let search_command: Option<String>;
+    let client: Arc<Mutex<Option<irc::client::Client>>> = Arc::new(Mutex::new(None));
+    let stream: Arc<Mutex<Option<irc::client::ClientStream>>> = Arc::new(Mutex::new(None));
+    let channel: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+    let search_command: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
     loop{
         let mut loop_state = state.lock().await;
         let mut loop_items = connections.lock().await;
@@ -208,7 +230,11 @@ async fn main () {
                                 KeyCode::Char(c) if c == 'q' || c == 'Q' =>{return},
                                 KeyCode::Down =>{connections.lock().await.next();},
                                 KeyCode::Up =>{connections.lock().await.previous();},
-                                KeyCode::Enter => {if let Some(s) = selected{*loop_state = States::Connecting(s);}},
+                                KeyCode::Enter => {if let Some(s) = selected{
+                                    tokio::task::spawn(
+                                        con_handle(client.clone(), s.clone(), NAME.clone(), stream.clone(), channel.clone(), search_command.clone(), state.clone())
+                                    );
+                                    *loop_state = States::Connecting(s);}},
                                 _ =>(),
                             }
                         },
@@ -234,18 +260,23 @@ async fn main () {
                                             .alignment(Alignment::Center);
                                         f.render_widget(prompt, chunks[0]);
                 }).unwrap();
-                let (c, s, chan, cmd) = connect(server, NAME.clone()).await.unwrap(); client = Some(c); stream = Some(s); channel = Some(chan); search_command = Some(cmd); *loop_state = States::Connected; break
-            },
-            _=>(),
+            	if poll(Duration::from_millis(100)).unwrap(){
+                    match read().unwrap(){
+                        Event::Key(_) => continue,
+                        Event::Mouse(_)=> continue,
+                        Event::Resize(_, _) => continue,
+                    }
+                }
+	    },
+            _=>(break),
         }
 
     }
-    let client = Arc::from(client.unwrap());
+    
     let (tx,rx) = mpsc::unbounded_channel();
-    let channel: Arc<String> = Arc::from(channel.unwrap());
-    let search_command: Arc<String> = Arc::from(search_command.unwrap());
-    tokio::task::spawn(pingpong(stream.unwrap(), tx, client.clone()));
+    tokio::task::spawn(pingpong(stream, tx, client.clone()));
     let stream = Arc::from(Mutex::from(rx));
+    
     let mut search_term = String::new();
     let mut dir_path = String::from("./");
     loop{
@@ -361,10 +392,12 @@ async fn main () {
                                                     KeyCode::Char(c) => {search_term.push(c)},
                                                     KeyCode::Backspace => {search_term.pop();},
                                                     KeyCode::Enter => {
+                                                        let search_command = search_command.lock().await;
+                                                        let channel = channel.lock().await;
                                                         tokio::task::spawn(get_search(
                                                             Args{
-                                                                chan: channel.clone(), 
-                                                                cmd: format!["{} {}", &search_command, &search_term], 
+                                                                chan: (&(*channel).as_ref().unwrap()).to_string(), 
+                                                                cmd: format!["{} {}", *search_command.as_ref().unwrap(), &search_term], 
                                                                 client: client.clone(), stream: stream.clone(), 
                                                                 items: items.clone(), 
                                                                 file_names: file_names.clone(), 
@@ -403,6 +436,13 @@ async fn main () {
                                         f.render_widget(prompt, chunks[0]);
                                     }
                                 ).unwrap();
+				if poll(Duration::from_millis(100)).unwrap(){
+                    			match read().unwrap(){
+                        			Event::Key(_) => continue,
+                        			Event::Mouse(_)=> continue,
+                        			Event::Resize(_, _) => continue,
+                    			}
+                		}
                             },
             States::Results=>  {   
                                 let mut loop_items = items.lock().await;
@@ -483,9 +523,10 @@ async fn main () {
                                                     KeyCode::Char(c) => {dir_path.push(c)},
                                                     KeyCode::Backspace => {dir_path.pop();},
                                                     KeyCode::Enter => {
+                                                        let channel = channel.lock().await;
                                                         tokio::task::spawn(get_book(
                                                             Args{
-                                                                chan: channel.clone(), 
+                                                                chan: (&(*channel).as_ref().unwrap()).to_string(), 
                                                                 cmd: cmd.to_string(), 
                                                                 client: client.clone(), 
                                                                 stream: stream.clone(), 
@@ -527,6 +568,13 @@ async fn main () {
                         f.render_widget(prompt, chunks[0]);
                     }
                 ).unwrap();
+		if poll(Duration::from_millis(100)).unwrap(){
+                    match read().unwrap(){
+                        Event::Key(_) => continue,
+                        Event::Mouse(_)=> continue,
+                        Event::Resize(_, _) => continue,
+                    }
+                }
             },
             States::Got =>{
                 terminal.draw(
