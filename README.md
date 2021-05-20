@@ -1,3 +1,5 @@
+The IRC channel banned all RBP[5#s] names and seems unhappy with the client. That being noted I will probably push out one more release to fix major errors and then cease work on the project.
+
 # rusty_book_pirate
 An application for downloading public domain ebooks from irc. Despite the name it is not to be used for illegal activities and I am in no way responsible for any such use.
 
